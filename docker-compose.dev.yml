@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  # Redis for Celery task queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  # Mock Piper TTS service for development
+  piper-mock:
+    build:
+      context: ./docker-services/piper-mock
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - temp_audio:/app/temp
+
+  # Mock GROBID service for development
+  grobid-mock:
+    build:
+      context: ./docker-services/grobid-mock
+      dockerfile: Dockerfile
+    ports:
+      - "8070:8070"
+
+  # Flask backend with Celery worker
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - GROBID_URL=http://grobid-mock:8070
+      - PIPER_URL=http://piper-mock:8080
+      - UPLOAD_FOLDER=/app/uploads
+      - TEMP_FOLDER=/app/temp
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+      - temp_files:/app/temp
+    depends_on:
+      - redis
+      - grobid-mock
+      - piper-mock
+    command: flask run --host=0.0.0.0 --port=5000
+
+  # Celery worker for background processing
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - GROBID_URL=http://grobid-mock:8070
+      - PIPER_URL=http://piper-mock:8080
+      - UPLOAD_FOLDER=/app/uploads
+      - TEMP_FOLDER=/app/temp
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+      - temp_files:/app/temp
+    depends_on:
+      - redis
+      - grobid-mock
+      - piper-mock
+    command: celery -A app.celery worker --loglevel=info
+
+  # React frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "12000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  redis_data:
+  uploads:
+  temp_files:
+  temp_audio:
+
+networks:
+  default:
+    driver: bridge
