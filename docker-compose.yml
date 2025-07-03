@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # Redis for Celery task queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  # GROBID service for PDF parsing
+  grobid:
+    image: lfoppiano/grobid:0.8.0
+    ports:
+      - "8070:8070"
+    environment:
+      - JAVA_OPTS=-Xmx4g
+    volumes:
+      - grobid_data:/opt/grobid/tmp
+
+  # Piper TTS service
+  piper:
+    build:
+      context: ./docker-services/piper-service
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - piper_models:/app/models
+      - temp_audio:/app/temp
+
+  # Flask backend with Celery worker
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - GROBID_URL=http://grobid:8070
+      - PIPER_URL=http://piper:8080
+      - UPLOAD_FOLDER=/app/uploads
+      - TEMP_FOLDER=/app/temp
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+      - temp_files:/app/temp
+    depends_on:
+      - redis
+      - grobid
+      - piper
+    command: flask run --host=0.0.0.0 --port=5000
+
+  # Celery worker for background processing
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - GROBID_URL=http://grobid:8070
+      - PIPER_URL=http://piper:8080
+      - UPLOAD_FOLDER=/app/uploads
+      - TEMP_FOLDER=/app/temp
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+      - temp_files:/app/temp
+    depends_on:
+      - redis
+      - grobid
+      - piper
+    command: celery -A app.celery worker --loglevel=info
+
+  # React frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "12000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+  # Cleanup service for 24h TTL
+  cleanup:
+    build:
+      context: ./docker-services/cleanup
+      dockerfile: Dockerfile
+    volumes:
+      - uploads:/uploads
+      - temp_files:/temp
+      - temp_audio:/audio
+    environment:
+      - CLEANUP_INTERVAL=3600  # Run every hour
+      - TTL_HOURS=24
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  grobid_data:
+  piper_models:
+  uploads:
+  temp_files:
+  temp_audio:
+
+networks:
+  default:
+    driver: bridge
